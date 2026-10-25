@@ -1,0 +1,16 @@
+# macOS, Python
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# tests and QA materials are kept locally, not published
+tests/
+
+# local keys
+.tavily_key
+*.key
+
+# the Russian documentation is kept locally, not published
+README.ru.md
