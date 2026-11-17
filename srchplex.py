@@ -3,7 +3,7 @@
 """
 Searchplex — Perplexity-style web research for OpenCode: an MCP server (stdio) and a CLI.
 
-A single file, Python 3.9+ standard library only, no API keys required (Tavily is optional). Optional
+A single file, Python 3.9+ standard library only, no API keys required (Tavily and Brave are optional). Optional
 packages are picked up when installed: certifi (root certificates), pypdf (PDF text) and playwright (rendering
 JavaScript pages). The primary search engine is SearXNG (SEARXNG_URL, default http://localhost:8080) for the
 web, news and papers; when it is down, fails or finds too little, built-in sources take over: DuckDuckGo,
@@ -63,7 +63,7 @@ import zlib
 from collections import Counter
 from html.parser import HTMLParser
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 BOT_UA = "srchplex/%s (research tool for LLM agents)" % VERSION
@@ -107,26 +107,73 @@ SEARXNG_URL = _env("SEARXNG_URL", "http://localhost:8080").rstrip("/")
 if SEARXNG_URL.lower() in ("off", "0", "false", "no", "none", "-"):
     SEARXNG_URL = ""
 GITHUB_TOKEN = _env("GITHUB_TOKEN")
-# Tavily (search API, optional): used only with TAVILY_API_KEY. SRCHPLEX_TAVILY: fallback (default) = after SearXNG
-# and before the built-in engines, primary = first, before SearXNG (web and news), last = only when the built-in
-# engines fail, off.
-# SEARCH_PROVIDER, used by other search MCP servers, also works: ddg turns Tavily off, tavily makes it primary.
+# Search APIs, optional: Tavily and Brave, used only with their keys. Each has a place in the web search order
+# (SRCHPLEX_TAVILY, SRCHPLEX_BRAVE): fallback (default) = after SearXNG and before the built-in engines,
+# primary = first, before SearXNG (web and news), last = only when the built-in engines fail, off.
+# With both in the same place Tavily goes first. SRCHPLEX_ENGINES sets the whole order at once and wins.
+# SEARCH_PROVIDER, used by other search MCP servers, also works: ddg turns the APIs off, tavily/brave make it primary.
 TAVILY_API_KEY = _env("TAVILY_API_KEY").strip("\"' ")  # quotes copied along with the key are not part of it
 TAVILY_URL = _env("TAVILY_URL", "https://api.tavily.com/search")
 TAVILY_TIMEOUT = max(1, _env_int("TAVILY_TIMEOUT_MS", 10000)) / 1000.0
+BRAVE_API_KEY = (_env("BRAVE_API_KEY") or _env("BRAVE_SEARCH_API_KEY")).strip("\"' ")
+BRAVE_URL = _env("BRAVE_URL", "https://api.search.brave.com/res/v1").rstrip("/")
+BRAVE_TIMEOUT = max(1, _env_int("BRAVE_TIMEOUT_MS", 10000)) / 1000.0
+BRAVE_INTERVAL = max(0, _env_int("BRAVE_MIN_INTERVAL_MS", 1100)) / 1000.0  # the free plan allows 1 request/s
+API_ENGINES = ("tavily", "brave")
+SCRAPED_ENGINES = ("duckduckgo", "yandex", "bing")
+ENGINE_NAMES = ("searxng",) + API_ENGINES + SCRAPED_ENGINES
+_ENGINE_ALIASES = {"ddg": "duckduckgo", "duck": "duckduckgo", "searx": "searxng", "brave-search": "brave"}
 
 
-def _tavily_mode():
-    mode = _env("SRCHPLEX_TAVILY", "auto").lower()
-    provider = _env("SEARCH_PROVIDER").lower()
-    if not TAVILY_API_KEY or mode in ("0", "off", "false", "no") or (provider == "ddg" and mode == "auto"):
+def _engines_order():
+    """SRCHPLEX_ENGINES ("searxng,brave,tavily,duckduckgo,yandex,bing") -> list of names; None when unset.
+    Engines left out are not used; an API without its key is skipped."""
+    raw = _env("SRCHPLEX_ENGINES").lower()
+    if not raw or raw in ("auto", "default"):
+        return None
+    order = []
+    for part in re.split(r"[\s,;>]+", raw):
+        name = _ENGINE_ALIASES.get(part, part)
+        if name in ENGINE_NAMES and name not in order:
+            order.append(name)
+        elif part:
+            sys.stderr.write("srchplex: SRCHPLEX_ENGINES: unknown engine '%s' ignored (known: %s)\n"
+                             % (part, ", ".join(ENGINE_NAMES)))
+    return order or None
+
+
+ENGINES_ORDER = _engines_order()
+
+
+def _api_mode(name):
+    """The place of a search API: primary, fallback, last, or "" (off)."""
+    if not globals()[name.upper() + "_API_KEY"]:
         return ""
-    if mode in ("primary", "first") or (provider == "tavily" and mode == "auto"):
+    if ENGINES_ORDER is not None:
+        if name not in ENGINES_ORDER:
+            return ""
+        pos = ENGINES_ORDER.index(name)
+        scraped = [ENGINES_ORDER.index(e) for e in SCRAPED_ENGINES if e in ENGINES_ORDER]
+        if "searxng" in ENGINES_ORDER and pos < ENGINES_ORDER.index("searxng"):
+            return "primary"
+        if scraped and pos > min(scraped):
+            return "last"
+        return "primary" if "searxng" not in ENGINES_ORDER and not scraped else "fallback"
+    mode = _env("SRCHPLEX_" + name.upper(), "auto").lower()
+    provider = _env("SEARCH_PROVIDER").lower()
+    if mode in ("0", "off", "false", "no") or (provider == "ddg" and mode == "auto"):
+        return ""
+    if mode in ("primary", "first") or (provider == name and mode == "auto"):
         return "primary"
     return "last" if mode == "last" else "fallback"
 
 
+def _tavily_mode():
+    return _api_mode("tavily")
+
+
 TAVILY_MODE = _tavily_mode()
+BRAVE_MODE = _api_mode("brave")
 BROWSER_ON = _env_on("SRCHPLEX_BROWSER")
 # 1: fetch refuses loopback, private and link-local addresses (redirects included); the LLM and SearXNG
 # addresses stay allowed. Off by default because the agent often reads its own localhost.
@@ -721,6 +768,12 @@ def _backend_error(name, err):
         # a wrong key or the plan's credits are used up: retrying soon only spends the time limit
         HEALTH.cooldown(name, 3600, "%s; check TAVILY_API_KEY and the credits left on the Tavily plan"
                         % str(err).rstrip("."))
+    elif name.startswith("brave") and isinstance(err, HttpError) and (
+            err.status in (401, 402, 403) or (err.status == 422 and "token" in str(err).lower())):
+        HEALTH.cooldown(name, 3600, "%s; check BRAVE_API_KEY and the plan at https://api-dashboard.search.brave.com"
+                        % str(err).rstrip("."))
+    elif name.startswith("brave") and isinstance(err, HttpError) and err.status == 429:
+        HEALTH.cooldown(name, 120, "%s (requests per second or the monthly limit of the Brave plan)" % err)
     elif isinstance(err, RateLimited):
         HEALTH.cooldown(name, 600, str(err))
     elif isinstance(err, HttpError) and err.status in (403, 429, 503):
@@ -2168,6 +2221,71 @@ def news_tavily(query, n=10, time_range=None, lang=None):
     return _tavily(query, n, time_range, topic="news")
 
 
+_BRAVE_FRESHNESS = {"day": "pd", "week": "pw", "month": "pm", "year": "py"}
+_BRAVE_LOCK = threading.Lock()
+_BRAVE_LAST = [0.0]
+
+
+def _brave_error(body):
+    """Brave explains errors as {"error": {"detail": "...", "code": "..."}}."""
+    try:
+        err = json.loads(body or "").get("error")
+    except (ValueError, AttributeError):
+        return ""
+    if isinstance(err, dict):
+        err = " ".join(str(err.get(k) or "") for k in ("code", "detail")).strip()
+    return clean_ws(str(err or ""))[:200]
+
+
+def brave_key_hint():
+    key = BRAVE_API_KEY
+    masked = "%s…%s, %d chars" % (key[:4], key[-4:], len(key)) if len(key) > 12 else "%d chars" % len(key)
+    problems = []
+    if not key.isascii():
+        problems.append("non-Latin characters: is it a placeholder instead of the real key?")
+    if re.search(r"\s", key):
+        problems.append("spaces or line breaks inside")
+    return masked, problems
+
+
+def _brave(kind, query, n=10, time_range=None):
+    """Brave Search API: kind is "web" or "news". site: operators work inside the query."""
+    params = {"q": query[:400], "count": max(1, min(20 if kind == "web" else 50, n))}
+    if time_range in _BRAVE_FRESHNESS:
+        params["freshness"] = _BRAVE_FRESHNESS[time_range]
+    url = "%s/%s/search?%s" % (BRAVE_URL, kind, urllib.parse.urlencode(params))
+    with _BRAVE_LOCK:  # parallel queries of deep_search would hit the per-second limit: space them out
+        wait = _BRAVE_LAST[0] + BRAVE_INTERVAL - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _BRAVE_LAST[0] = time.time()
+    try:
+        data = http_json(url, headers={"X-Subscription-Token": BRAVE_API_KEY}, timeout=BRAVE_TIMEOUT)
+    except HttpError as e:
+        detail = _brave_error(e.body)
+        if detail:
+            raise HttpError(e.status, detail, e.body) from None
+        raise
+    items = (data.get("web") or {}).get("results") if kind == "web" else data.get("results")
+    out = []
+    for r in items or []:
+        url = r.get("url") or ""
+        if url.startswith("http"):
+            date = r.get("page_age") or ""
+            out.append({"title": clean_ws(strip_tags(r.get("title") or "")) or url, "url": url,
+                        "snippet": truncate(clean_ws(strip_tags(r.get("description") or "")), 500),
+                        "engine": "brave", "date": date[:10] if re.match(r"^\d{4}-\d{2}-\d{2}", date) else ""})
+    return out
+
+
+def engine_brave(query, time_range=None, lang=None):  # Brave detects the query language itself
+    return _brave("web", query, 10, time_range)
+
+
+def news_brave(query, n=10, time_range=None, lang=None):
+    return _brave("news", query, n, time_range)
+
+
 _SEARXNG = {"ts": 0.0, "ok": False, "known": False}
 _SEARXNG_LOCK = threading.Lock()
 
@@ -2177,7 +2295,7 @@ def searxng_available():
 
     Without this check every search on a machine without SearXNG would start by waiting for a timeout.
     """
-    if not SEARXNG_URL:
+    if not SEARXNG_URL or (ENGINES_ORDER is not None and "searxng" not in ENGINES_ORDER):
         return False
     with _SEARXNG_LOCK:
         now = time.time()
@@ -2214,20 +2332,48 @@ def _looks_relevant(query, results):
     return hits >= max(1 if len(top) <= 2 else 2, 0.3 * len(top))  # with 1-2 results, one on-topic hit is enough
 
 
+def _api_engine(name):
+    return globals()["engine_" + name]  # looked up at call time: the tests replace the engines
+
+
+def web_engine_order(prefer=0):
+    """[(name, fn)] in the order web_search asks them: SRCHPLEX_ENGINES, or the default order built from the
+    places of the APIs (TAVILY_MODE, BRAVE_MODE): primary, SearXNG, fallback, built-in engines, last."""
+    builtin = list(WEB_ENGINES)
+    if ENGINES_ORDER is not None:
+        known = dict(builtin)
+        engines = []
+        for name in ENGINES_ORDER:
+            if name == "searxng":
+                if searxng_available():
+                    engines.append((name, engine_searxng))
+            elif name in API_ENGINES:
+                if globals()[name.upper() + "_MODE"]:
+                    engines.append((name, _api_engine(name)))
+            elif name in known:
+                engines.append((name, known[name]))
+    else:
+        apis = {mode: [(n, _api_engine(n)) for n in API_ENGINES if globals()[n.upper() + "_MODE"] == mode]
+                for mode in ("primary", "fallback", "last")}
+        engines = (apis["primary"] + ([("searxng", engine_searxng)] if searxng_available() else [])
+                   + apis["fallback"] + builtin + apis["last"])
+    if prefer % 2 == 1:  # alternate parallel queries between DDG and Yandex to avoid bans
+        names = [n for n, _ in engines]
+        if "duckduckgo" in names and "yandex" in names:
+            i, j = names.index("duckduckgo"), names.index("yandex")
+            engines[i], engines[j] = engines[j], engines[i]
+        elif engines and ENGINES_ORDER is None and len(builtin) >= 2:  # the built-in pair under other names
+            i = [n for n, _ in engines].index(builtin[0][0])
+            engines[i], engines[i + 1] = engines[i + 1], engines[i]
+    return engines
+
+
 def web_search(query, time_range=None, max_results=10, prefer=0, lang=None):
     """Web search -> (results, engine). SearXNG first; when it is down, fails, or returns nothing or off-topic
     results, the fallback engines are tried in turn, with cooldowns on bot protection.
 
     lang: the language of a query searched in its own language ("ru", "auto"); None means English."""
-    engines = list(WEB_ENGINES)
-    if prefer % 2 == 1:  # alternate parallel queries between DDG and Yandex to avoid bans
-        engines[0], engines[1] = engines[1], engines[0]
-    if TAVILY_MODE == "last":
-        engines.append(("tavily", engine_tavily))
-    elif TAVILY_MODE:
-        engines.insert(0, ("tavily", engine_tavily))
-    if searxng_available():
-        engines.insert(1 if TAVILY_MODE == "primary" else 0, ("searxng", engine_searxng))
+    engines = web_engine_order(prefer)
     partial = []  # SearXNG returned only 1-2 results: top them up from a fallback engine
     for name, fn in engines:
         if not HEALTH.ok(name):
@@ -2246,9 +2392,9 @@ def web_search(query, time_range=None, max_results=10, prefer=0, lang=None):
                 if r["url"].startswith("http") and not _is_ad(r["url"]) and k not in seen:
                     seen.add(k)
                     clean.append(r)
-            # the soft-ban guard is for scraped engines: an API does not ban, and Tavily matches by meaning,
+            # the soft-ban guard is for scraped engines: an API does not ban, and Tavily or Brave match by meaning,
             # so its results for a long question in a sentence need not repeat the question's words
-            if name != "tavily" and not _looks_relevant(query, clean):
+            if name not in API_ENGINES and not _looks_relevant(query, clean):
                 if "site:" not in query:  # few pages of one site match: that is no sign of a ban
                     HEALTH.failure(name, "results do not match the query '%s'" % query)
                 continue
@@ -2437,8 +2583,12 @@ OWN_SOURCES = {"news": [("bing-news", news_bing, 1.0)],
                "academic": [("arxiv", acad_arxiv, 1.0), ("openalex", acad_openalex, 1.0)],
                "discussions": [("hackernews", disc_hackernews, 1.0), ("reddit", disc_reddit, 1.0)],
                "code": [("stackoverflow", code_stackoverflow, 1.0), ("github", code_github, 0.8)]}
-if TAVILY_MODE == "fallback":  # primary asks it before SearXNG; "last" saves its credits for the web search only
+# a search API in the fallback place also runs with Bing News; primary ones are asked before SearXNG (search_focus);
+# "last" saves the credits for the web search only
+if TAVILY_MODE == "fallback":
     OWN_SOURCES["news"].append(("tavily-news", news_tavily, 1.0))
+if BRAVE_MODE == "fallback":
+    OWN_SOURCES["news"].append(("brave-news", news_brave, 1.0))
 
 
 def _searxng_category(category):
@@ -2505,13 +2655,20 @@ def search_focus(query, focus="web", n=10, time_range=None, domains=None, prefer
                 engines.add(engine)
         return rrf_merge(lists)[:n], sorted(engines)
     results, engines = [], []
-    if focus == "news" and TAVILY_MODE == "primary" and HEALTH.ok("tavily-news"):  # Tavily first, as in the web
-        try:
-            results = _cached_backend("tavily-news", news_tavily, query, n, time_range, lang)
-        except Exception as e:  # noqa: BLE001
-            _backend_error("tavily-news", e)
-        if results:
-            engines.append("tavily-news")
+    if focus == "news":  # search APIs in the primary place go before SearXNG, as in the web search
+        primary = [n for n in (ENGINES_ORDER or API_ENGINES) if n in API_ENGINES
+                   and globals()[n.upper() + "_MODE"] == "primary"]
+        for api in primary:
+            if len(results) >= 3 or not HEALTH.ok(api + "-news"):
+                continue
+            found = []
+            try:
+                found = _cached_backend(api + "-news", globals()["news_" + api], query, n, time_range, lang)
+            except Exception as e:  # noqa: BLE001
+                _backend_error(api + "-news", e)
+            if found:
+                results = rrf_merge([results, found]) if results else found
+                engines.append(api + "-news")
     name = "searxng-" + focus
     if len(results) < 3 and focus in _SEARXNG_CATEGORY and searxng_available() and HEALTH.ok(name):
         found = []
@@ -4461,19 +4618,29 @@ def doctor():
               ("bing", lambda: engine_bing(probe)), ("bing-news", lambda: news_bing("technology", 5)),
               ("arxiv", lambda: acad_arxiv("large language models", 3)),
               ("openalex", lambda: acad_openalex("large language models", 3))]
-    tavily = {"fallback": "after SearXNG, before the built-in engines",
+    places = {"fallback": "after SearXNG, before the built-in engines",
               "primary": "first, before SearXNG (web and news)",
               "last": "only when the built-in engines fail"}
-    if TAVILY_MODE:
-        print("Tavily: on, %s (SRCHPLEX_TAVILY=%s); every search spends a credit" % (tavily[TAVILY_MODE], TAVILY_MODE))
-        masked, problems = tavily_key_hint()
-        print("  key: %s%s" % (masked, "".join("\n  WARNING: " + p for p in problems)))
-        print("  on HTTP 401 compare it with the key at https://app.tavily.com: the whole key, no extra characters")
-        checks[:0] = [("tavily", lambda: engine_tavily(probe))]
-    elif TAVILY_API_KEY:
-        print("Tavily: key set, but turned off (SRCHPLEX_TAVILY or SEARCH_PROVIDER=ddg)")
-    else:
-        print("Tavily: not used (optional: set TAVILY_API_KEY)")
+    order = [n for n, _ in web_engine_order()]
+    print("Web search order%s: %s" % (" (SRCHPLEX_ENGINES)" if ENGINES_ORDER is not None else "",
+                                      " → ".join(order) or "nothing!"))
+    if ENGINES_ORDER is not None and "searxng" in ENGINES_ORDER and "searxng" not in order:
+        print("  searxng is in SRCHPLEX_ENGINES but does not answer, so it is skipped for now")
+    api_checks = []
+    for api, title, site, var in (("tavily", "Tavily", "https://app.tavily.com", "SRCHPLEX_TAVILY"),
+                                  ("brave", "Brave", "https://api-dashboard.search.brave.com", "SRCHPLEX_BRAVE")):
+        mode, key = globals()[api.upper() + "_MODE"], globals()[api.upper() + "_API_KEY"]
+        if mode:
+            print("%s: on, %s; every search spends a request of the plan" % (title, places[mode]))
+            masked, problems = (tavily_key_hint if api == "tavily" else brave_key_hint)()
+            print("  key: %s%s" % (masked, "".join("\n  WARNING: " + p for p in problems)))
+            print("  on HTTP 401/403/422 compare it with the key at %s: the whole key, no extra characters" % site)
+            api_checks.append((api, (lambda fn: lambda: fn(probe))(_api_engine(api))))
+        elif key:
+            print("%s: key set, but turned off (%s, SRCHPLEX_ENGINES or SEARCH_PROVIDER=ddg)" % (title, var))
+        else:
+            print("%s: not used (optional: set %s_API_KEY)" % (title, api.upper()))
+    checks[:0] = api_checks
     if searxng_available():
         checks[:0] = [("searxng", lambda: engine_searxng(probe)),
                       ("searxng-news", lambda: engine_searxng("technology", categories=["news"])),

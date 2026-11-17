@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.0 — 2026-10-26
+
+- SearXNG updates itself: a daily scheduled check (LaunchAgent on macOS, Task Scheduler on Windows) updates at
+  most once a week and only when GitHub has a newer commit. The update is safe: the new version is downloaded
+  while the old one runs, gets a fresh venv, and must start and answer a test search; otherwise the old version
+  comes back. `searxng_setup.py status` shows the last check, `--no-autoupdate` and `update --force` control it.
+- `searxng_update.py`: update SearXNG by hand with one command (`--check`, `--force`, `--dir`); it also refreshes
+  the copy of the setup script that the scheduled update runs.
+- Brave Search API as an optional engine, used only with `BRAVE_API_KEY`: web and news, after Tavily by default.
+  Requests are spaced to the plan's per-second limit; a bad key or used-up credits pause it for an hour.
+- `SRCHPLEX_ENGINES` sets the whole web search order (SearXNG, Tavily, Brave, DuckDuckGo, Yandex, Bing); news
+  follow it. `SRCHPLEX_BRAVE` moves Brave alone, like `SRCHPLEX_TAVILY`. Without them the order is unchanged.
+- `install.py`: registers the server in the OpenCode config (with a backup), stores the API keys in private
+  files, lets you choose the search order, and offers SearXNG, the rules and `--doctor`. The manual install
+  stays in the README.
+- `--doctor` prints the web search order and checks Brave.
+- `AGENTS.md` names the tools exactly: some local models (Qwen) sometimes call `tools.srchplex`, which OpenCode
+  rejects with "No tool named ..." before the model retries with the right name.
+
 ## 1.1.0 — 2026-10-25
 
 - Tavily as an optional search engine, used only with `TAVILY_API_KEY`; without the key the search order is
