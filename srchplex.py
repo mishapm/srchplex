@@ -3213,7 +3213,7 @@ _PICK_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["p
                 "properties": {"picked": {"type": "array", "items": {"type": "integer"}}}}
 
 # The Russian example questions are data: the first shows that queries stay in English for an international
-# topic, the other two when local-language queries are added (a slang word, a local fee).
+# topic, the other two when local-language queries are added (a slang word, a spelling rule).
 PLAN_PROMPT = """You are the query planner of a web research engine similar to Perplexity.
 Today is {date}. Your own knowledge is outdated, so plan searches even for facts that seem well known.
 
@@ -3246,8 +3246,8 @@ Question: почему asyncio.TaskGroup отменяет все задачи п
 {"reasoning": "Python asyncio semantics: check the official docs and discussions of this behaviour.", "queries": ["asyncio TaskGroup cancel tasks on exception", "asyncio TaskGroup ExceptionGroup documentation", "TaskGroup exception handling example"], "local_language": "", "local_queries": [], "focus": ["web", "code"]}
 Question: что значит слово «душнила»
 {"reasoning": "Russian slang: Russian dictionaries and articles explain it, English sources barely do.", "queries": ["dushnila Russian slang meaning"], "local_language": "ru", "local_queries": ["душнила значение слова", "душнила кто это"], "focus": ["web"]}
-Question: сколько стоит загранпаспорт в Беларуси
-{"reasoning": "A local fee: official Belarusian sources in Russian have the current price.", "queries": ["Belarus passport fee"], "local_language": "ru", "local_queries": ["стоимость загранпаспорта Беларусь", "госпошлина паспорт Беларусь"], "focus": ["web"]}
+Question: как правильно писать: «в течение» или «в течении»
+{"reasoning": "A Russian spelling rule: Russian grammar references explain it, English sources barely do.", "queries": ["Russian spelling v techenie vs v techenii"], "local_language": "ru", "local_queries": ["в течение или в течении как правильно", "в течение правописание предлога"], "focus": ["web"]}
 
 Reply with JSON only: {"reasoning": "<one sentence>", "queries": ["..."], "local_language": "", "local_queries": [], "focus": ["web"]}"""
 
