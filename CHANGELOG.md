@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Windows: `install.py`, `searxng_setup.py` and `searxng_update.py` no longer crash with `UnicodeEncodeError` on
+  a non-UTF-8 console (cp1251, cp866): their output is UTF-8 with replacement, as in `srchplex.py`.
+- Windows: HTTPS also trusts the AuthRoot store (and certifi when installed). Python loads only ROOT and CA,
+  so sites whose root Windows has not yet copied to ROOT (arxiv.org, Certainly Root R1) failed with
+  `CERTIFICATE_VERIFY_FAILED`. `--doctor` shows how many certificates were added; `SSL_CERT_FILE` still wins.
+
 ## 1.2.0 — 2026-10-26
 
 - SearXNG updates itself: a daily scheduled check (LaunchAgent on macOS, Task Scheduler on Windows) updates at

@@ -23,6 +23,7 @@ import searxng_setup as setup  # noqa: E402 — next to this script
 
 
 def main():
+    setup.utf8_console()
     ap = argparse.ArgumentParser(prog="searxng_update.py", description="Update SearXNG for srchplex now.")
     ap.add_argument("--dir", default=setup.default_dir(), help="SearXNG folder (default: %(default)s)")
     ap.add_argument("--force", action="store_true", help="reinstall even if there is no newer commit")

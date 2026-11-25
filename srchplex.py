@@ -449,6 +449,35 @@ def _norm_time(value):
 # HTTP
 # --------------------------------------------------------------------------- #
 
+def _load_windows_roots(ctx):
+    """Add the Windows AuthRoot store (and certifi) to ctx; returns how many certificates were added.
+
+    Python loads only the ROOT and CA stores. Windows fills ROOT lazily (and fetches missing intermediates
+    via AIA), so newer roots such as Certainly Root R1 (arxiv.org) are often only in AuthRoot, and OpenSSL
+    fails with CERTIFICATE_VERIFY_FAILED where a browser works.
+    """
+    added = 0
+    try:
+        entries = ssl.enum_certificates("AuthRoot")  # noqa: WPS437 — Windows only
+    except Exception:  # noqa: BLE001
+        entries = []
+    for cert, encoding, trust in entries:
+        if encoding != "x509_asn" or not (trust is True or ssl.Purpose.SERVER_AUTH.oid in trust):
+            continue
+        try:
+            ctx.load_verify_locations(cadata=cert)
+            added += 1
+        except (ssl.SSLError, ValueError):
+            continue
+    try:
+        import certifi  # noqa: WPS433 — optional dependency
+        ctx.load_verify_locations(cafile=certifi.where())
+        added += 1
+    except Exception:  # noqa: BLE001
+        pass
+    return added
+
+
 def _ssl_context():
     """SSL context with fallback root certificates.
 
@@ -457,7 +486,11 @@ def _ssl_context():
     """
     ctx = ssl.create_default_context()
     source = "system"
-    if sys.platform != "win32" and not os.environ.get("SSL_CERT_FILE"):
+    if sys.platform == "win32" and not os.environ.get("SSL_CERT_FILE"):
+        added = _load_windows_roots(ctx)
+        if added:
+            source = "system (Windows ROOT + CA + AuthRoot/certifi: %d added)" % added
+    elif not os.environ.get("SSL_CERT_FILE"):
         paths = ssl.get_default_verify_paths()
         has_system = bool(paths.cafile and os.path.exists(paths.cafile)) or bool(
             paths.capath and os.path.isdir(paths.capath) and os.listdir(paths.capath))

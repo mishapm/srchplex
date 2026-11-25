@@ -309,8 +309,18 @@ def install_rules(dry_run):
 
 # --------------------------------------------------------------------------- #
 
+def utf8_console():
+    """A cp1251/cp866 console (or a redirect) cannot encode "→" and the like: print UTF-8, never crash."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main():
     global ASSUME_YES
+    utf8_console()
     ap = argparse.ArgumentParser(prog="install.py", description="Register Searchplex in OpenCode.")
     ap.add_argument("--config", help="OpenCode config (default: ~/.config/opencode/opencode.json)")
     ap.add_argument("--engines", help="search order, e.g. searxng,brave,tavily,duckduckgo,yandex,bing; "

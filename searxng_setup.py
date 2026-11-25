@@ -153,6 +153,15 @@ finally:
 # Output and small helpers
 # --------------------------------------------------------------------------- #
 
+def utf8_console():
+    """A cp1251/cp866 console (or a redirect) cannot encode every character: print UTF-8, never crash."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def say(message):
     print("==> " + message, flush=True)
 
@@ -412,10 +421,43 @@ def find_python():
     fail("SearXNG needs Python 3.10 or newer; install it from https://www.python.org/downloads/ and run again")
 
 
+def load_windows_roots(ctx):
+    """Add the Windows AuthRoot store (and certifi) to ctx; returns how many certificates were added.
+
+    Python loads only the ROOT and CA stores. Windows fills ROOT lazily (and fetches missing intermediates
+    via AIA), so newer roots such as Certainly Root R1 are often only in AuthRoot, and OpenSSL fails with
+    CERTIFICATE_VERIFY_FAILED where a browser works.
+    """
+    added = 0
+    for name in ("AuthRoot",):
+        try:
+            entries = ssl.enum_certificates(name)  # noqa: WPS437 — Windows only
+        except Exception:  # noqa: BLE001
+            continue
+        for cert, encoding, trust in entries:
+            if encoding != "x509_asn" or not (trust is True or ssl.Purpose.SERVER_AUTH.oid in trust):
+                continue
+            try:
+                ctx.load_verify_locations(cadata=cert)
+                added += 1
+            except (ssl.SSLError, ValueError):
+                continue
+    try:
+        import certifi  # noqa: WPS433 — optional dependency
+        ctx.load_verify_locations(cafile=certifi.where())
+        added += 1
+    except Exception:  # noqa: BLE001
+        pass
+    return added
+
+
 def ssl_context():
     """Fallback root certificates: the python.org build on macOS may not see the system ones."""
     ctx = ssl.create_default_context()
-    if WINDOWS or os.environ.get("SSL_CERT_FILE"):
+    if os.environ.get("SSL_CERT_FILE"):
+        return ctx
+    if WINDOWS:
+        load_windows_roots(ctx)
         return ctx
     paths = ssl.get_default_verify_paths()
     if (paths.cafile and os.path.exists(paths.cafile)) or (
@@ -1127,6 +1169,7 @@ def _force_remove(func, path, _exc):
 
 
 def main():
+    utf8_console()
     ap = argparse.ArgumentParser(prog="searxng_setup.py",
                                  description="Install and run SearXNG for the srchplex MCP server (one command).")
     ap.add_argument("command", nargs="?", default="install",
